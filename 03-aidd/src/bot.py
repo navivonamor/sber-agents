@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -27,6 +27,10 @@ async def cmd_start(message: Message):
         "Задавай мне вопросы о приготовлении пищи, рецептах и кулинарных техниках!"
     )
 
+async def handle_text_message(message: Message):
+    """Обработчик текстовых сообщений (эхо-ответ)"""
+    await message.answer(message.text)
+
 async def main():
     """Главная функция запуска бота"""
     if not TELEGRAM_BOT_TOKEN:
@@ -36,8 +40,9 @@ async def main():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
     
-    # Регистрация обработчиков
+    # Регистрация обработчиков (команды первыми для приоритета)
     dp.message.register(cmd_start, Command("start"))
+    dp.message.register(handle_text_message, F.text)
     
     logger.info("Бот запущен")
     await dp.start_polling(bot)
