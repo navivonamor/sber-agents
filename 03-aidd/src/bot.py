@@ -29,44 +29,81 @@ logger = logging.getLogger(__name__)
 # LLM Client (инициализируется в main())
 client: OpenAI | None = None
 
-async def get_llm_response(user_message: str) -> str:
-    """Получить ответ от LLM"""
+# Dialog Manager (in-memory)
+dialog_history: dict[int, list[dict]] = {}
+
+async def get_llm_response(user_message: str, chat_id: int) -> str:
+    """Получить ответ от LLM с учетом истории"""
     if client is None:
         raise RuntimeError("LLM client не инициализирован")
     try:
-        logger.info(f"Запрос к LLM (модель: {LLM_MODEL})")
-        # Используем asyncio.to_thread для неблокирующего вызова синхронной функции
+        # Формируем историю для передачи в LLM
+        history = dialog_history.get(chat_id, [])
+        messages = ([{"role": "system", "content": SYSTEM_PROMPT}] +
+                    history + [{"role": "user", "content": user_message}])
+        # Оставляем system prompt + последние 10 пользовательских сообщений
+        messages = [messages[0]] + messages[1:][-10:]
+        logger.info(f"Запрос к LLM (модель: {LLM_MODEL}, история: {len(messages)-1} сообщений)")
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
             temperature=LLM_TEMPERATURE,
         )
         response_text = response.choices[0].message.content
         logger.info(f"Получен ответ от LLM (длина: {len(response_text)} символов)")
         return response_text
     except Exception as e:
-        logger.error(f"Ошибка при запросе к LLM: {e}", exc_info=True)
+        logger.error(
+            f"Ошибка при запросе к LLM: {e}\nmessages: {messages}",
+            exc_info=True
+        )
         raise
 
 # Telegram Handler
 async def cmd_start(message: Message):
     """Обработчик команды /start"""
-    await message.answer(
-        "Привет! Я кулинарный помощник. "
-        "Задавай мне вопросы о приготовлении пищи, рецептах и кулинарных техниках!"
-    )
+    try:
+        await message.answer(
+            "Привет! Я кулинарный помощник. "
+            "Задавай мне вопросы о приготовлении пищи, рецептах и кулинарных техниках!"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке /start: {e}", exc_info=True)
+        await message.answer("Произошла ошибка. Попробуйте ещё раз.")
+
+async def cmd_reset(message: Message):
+    """Обработка команды /reset (очистка истории для пользователя)"""
+    try:
+        chat_id = message.chat.id
+        dialog_history.pop(chat_id, None)
+        await message.answer("История диалога очищена. Начнем заново!")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке /reset: {e}", exc_info=True)
+        await message.answer("Произошла ошибка. Попробуйте ещё раз.")
 
 async def handle_text_message(message: Message):
     """Обработчик текстовых сообщений"""
     logger.info(f"Получено сообщение из чата {message.chat.id}")
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Сообщение не должно быть пустым.")
+        logger.info(f"Пустое сообщение из чата {chat_id}, не отправлено в LLM")
+        return
     try:
-        response_text = await get_llm_response(message.text)
+        # Добавляем сообщение пользователя в историю
+        dialog_history.setdefault(chat_id, []).append({"role": "user", "content": text})
+        # Обрезаем историю до 10 последних сообщений (не считая system)
+        if len(dialog_history[chat_id]) > 10:
+            dialog_history[chat_id] = dialog_history[chat_id][-10:]
+        response_text = await get_llm_response(text, chat_id)
         await message.answer(response_text)
-        logger.info(f"Отправлен ответ в чат {message.chat.id}")
+        logger.info(f"Отправлен ответ в чат {chat_id}")
+        # Сохраняем ответ ассистента в историю
+        dialog_history[chat_id].append({"role": "assistant", "content": response_text})
+        if len(dialog_history[chat_id]) > 10:
+            dialog_history[chat_id] = dialog_history[chat_id][-10:]
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}", exc_info=True)
         await message.answer("Извините, произошла ошибка. Попробуйте еще раз.")
@@ -92,10 +129,14 @@ async def main():
     
     # Регистрация обработчиков (команды первыми для приоритета)
     dp.message.register(cmd_start, Command("start"))
+    dp.message.register(cmd_reset, Command("reset"))
     dp.message.register(handle_text_message, F.text)
     
     logger.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Фатальная ошибка polling: {e}", exc_info=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
